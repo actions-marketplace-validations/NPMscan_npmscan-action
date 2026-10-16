@@ -6,15 +6,25 @@
  * (lockfile, contribution policies, npmscan API parse check), then add the
  * workflow, push and open the PR. Every outcome is written back to tracker.csv.
  *
- *   node outreach/scripts/process-prs.ts [--wave 12] [--limit 5] [--repo owner/name] [--retry-failed] [--dry-run]
+ *   node outreach/scripts/process-prs.ts --agent <model> [--wave 12] [--limit 5] [--repo owner/name] [--retry-failed] [--dry-run]
+ *   node outreach/scripts/process-prs.ts --agent <model> --repo owner/name --body path/to/body.md
+ *
+ * --agent (or NPMSCAN_AGENT) names the model doing the run and is written to
+ * each row; it's not needed for --dry-run.
+ *
+ * --body opens one PR with a hand-written body (for repos with a PR template,
+ * CLA or other policy a person has reviewed). It skips the contribution-policy
+ * checks and also accepts rows held as needs_user_decision.
  */
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 import { config } from './lib/config.ts';
 import { Checkout } from './lib/git.ts';
 import { createPr, currentUser, ensureFork, findOpenPr, repoInfo } from './lib/github.ts';
 import { preflight } from './lib/preflight.ts';
-import { Tracker, type Row } from './lib/tracker.ts';
+import { resolveAgent, Tracker, type Row } from './lib/tracker.ts';
 import { WORKFLOW_PATH, writeWorkflow } from './lib/workflow.ts';
 
 const { values: args } = parseArgs({
@@ -24,11 +34,21 @@ const { values: args } = parseArgs({
     repo: { type: 'string' },
     'retry-failed': { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },
+    body: { type: 'string' },
+    agent: { type: 'string' },
   },
 });
 
 const dryRun = args['dry-run'];
-const pending = new Set(['not_contacted', ...(args['retry-failed'] ? ['failed'] : [])]);
+const bodyPath = args.body ? resolve(args.body) : config.prBodyPath;
+if (args.body && !args.repo) throw new Error('--body needs --repo: a hand-written body is for one repo');
+if (args.body && !existsSync(bodyPath)) throw new Error(`--body file not found: ${bodyPath}`);
+
+const pending = new Set([
+  'not_contacted',
+  ...(args['retry-failed'] ? ['failed'] : []),
+  ...(args.body ? ['needs_user_decision', 'failed'] : []),
+]);
 
 async function processRow(tracker: Tracker, row: Row): Promise<string> {
   const record = (changes: Partial<Row>) => (dryRun ? undefined : tracker.update(row, changes));
@@ -44,7 +64,7 @@ async function processRow(tracker: Tracker, row: Row): Promise<string> {
   const fork = dryRun ? repo : ensureFork(repo);
   const checkout = Checkout.prepare(repo, fork, info.defaultBranch);
 
-  const check = await preflight(checkout);
+  const check = await preflight(checkout, { skipPolicy: Boolean(args.body) });
   if (!check.ok) {
     const { status, reason, changes } = check.hold;
     record({ ...changes, status, reason, default_branch: info.defaultBranch });
@@ -58,7 +78,7 @@ async function processRow(tracker: Tracker, row: Row): Promise<string> {
     writeWorkflow(checkout.path, check.lockfile);
     checkout.commitAndPush(WORKFLOW_PATH);
   }
-  const prUrl = existing ?? createPr(repo, info.defaultBranch, config.prBodyPath);
+  const prUrl = existing ?? createPr(repo, info.defaultBranch, bodyPath);
 
   record({
     status: 'pr_opened',
@@ -69,13 +89,14 @@ async function processRow(tracker: Tracker, row: Row): Promise<string> {
     commit_sha: config.actionSha,
     next_action: 'monitor_pr',
     outcome: 'awaiting_review',
-    reason: '',
+    reason: args.body ? 'hand-written PR body' : '',
   });
   return existing ? `PR already open: ${prUrl}` : `opened ${prUrl}`;
 }
 
 async function main(): Promise<void> {
-  const tracker = new Tracker(config.trackerPath);
+  const agent = dryRun ? '' : resolveAgent(args.agent);
+  const tracker = new Tracker(config.trackerPath, { readOnly: dryRun, agent });
   const limit = Number(args.limit);
 
   const queue = tracker.rows
@@ -88,7 +109,7 @@ async function main(): Promise<void> {
     console.log('Nothing to process.');
     return;
   }
-  console.log(`${dryRun ? '[dry run] ' : ''}Processing ${queue.length} repo(s) as ${currentUser()}\n`);
+  console.log(`${dryRun ? '[dry run] ' : ''}Processing ${queue.length} repo(s) as ${currentUser()}${agent ? ` (agent: ${agent})` : ''}\n`);
 
   let opened = 0;
   for (const [i, row] of queue.entries()) {
