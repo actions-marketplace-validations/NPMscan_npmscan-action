@@ -61,6 +61,7 @@ It takes `not_contacted` rows in tracker order (plus `failed` with `--retry-fail
    | ...requires DCO or a CLA | `needs_user_decision` |
    | Has any PR template | `needs_user_decision` (fill it by hand, then use `--body`) |
    | npmscan API rejects the lockfile | `skipped_unsupported_lockfile` (don't ship a broken check) |
+   | npmscan API unreachable, 429 or 5xx (after one retry) | `failed`, so `--retry-failed` picks it up later. It says nothing about the lockfile |
 
    `--body` skips the four policy rows, but the lockfile and API checks always run.
 
@@ -89,7 +90,7 @@ For every row with a `pr_url` it fetches the PR, issue comments, reviews and inl
 | open, a human commented last | `pr_opened` | `engaged` | `reply_to_maintainer` |
 | open, we commented last | `pr_opened` | `awaiting_maintainer` | `monitor_pr` |
 
-`blocked_requirement` (e.g. waiting on a CLA) is kept while the PR is open. `maintainer` is the last human who isn't us. `reason` and `notes` are never touched, and `agent` is only set on rows whose state changed: after reading a maintainer's reply, write the gist there with `mark.ts --reason "..."`.
+`blocked_requirement` (e.g. waiting on a CLA) is kept while the PR is open. `maintainer` is the last human who isn't us, else whoever merged the PR, else the name already in the row. `reason` and `notes` are never touched, and `agent` is only set on rows whose state changed: after reading a maintainer's reply, write the gist there with `mark.ts --reason "..."`.
 
 ## Tracker
 
